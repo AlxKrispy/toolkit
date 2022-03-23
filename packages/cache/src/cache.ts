@@ -44,6 +44,20 @@ function checkKey(key: string): void {
 }
 
 /**
+ * isEnable to check the presence of Artifact cache service
+ *
+ * @returns boolean return true if Artifact cache service is enable, otherwise false
+ */
+
+export function isEnable(): boolean {
+  if (process.env['ACTIONS_CACHE_URL']) {
+    return true
+  }
+
+  return false
+}
+
+/**
  * Restores cache from keys
  *
  * @param paths a list of file paths to restore from the cache
