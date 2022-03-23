@@ -133,7 +133,7 @@ export class DownloadProgress {
    *
    * @param delayInMs the delay between each write
    */
-  startDisplayTimer(delayInMs: number = 1000): void {
+  startDisplayTimer(delayInMs = 1000): void {
     const displayCallback = (): void => {
       this.display()
 
@@ -190,7 +190,7 @@ export async function downloadCacheHttpClient(
 
   if (contentLengthHeader) {
     const expectedLength = parseInt(contentLengthHeader)
-    const actualLength = utils.getArchiveFileSizeIsBytes(archivePath)
+    const actualLength = utils.getArchiveFileSizeInBytes(archivePath)
 
     if (actualLength !== expectedLength) {
       throw new Error(
@@ -249,15 +249,18 @@ export async function downloadCacheStorageSDK(
       downloadProgress.startDisplayTimer()
 
       while (!downloadProgress.isDone()) {
+        const segmentStart =
+          downloadProgress.segmentOffset + downloadProgress.segmentSize
+
         const segmentSize = Math.min(
           maxSegmentSize,
-          contentLength - downloadProgress.segmentOffset
+          contentLength - segmentStart
         )
 
         downloadProgress.nextSegment(segmentSize)
 
         const result = await client.downloadToBuffer(
-          downloadProgress.segmentOffset,
+          segmentStart,
           segmentSize,
           {
             concurrency: options.downloadConcurrency,

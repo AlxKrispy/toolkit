@@ -1,4 +1,4 @@
-import {debug, info} from '@actions/core'
+import {debug, info, warning} from '@actions/core'
 import {promises as fs} from 'fs'
 import {HttpCodes, HttpClient} from '@actions/http-client'
 import {BearerCredentialHandler} from '@actions/http-client/auth'
@@ -30,7 +30,7 @@ export function getExponentialRetryTimeInMilliseconds(
   const maxTime = minTime * getRetryMultiplier()
 
   // returns a random number between the minTime (inclusive) and the maxTime (exclusive)
-  return Math.random() * (maxTime - minTime) + minTime
+  return Math.trunc(Math.random() * (maxTime - minTime) + minTime)
 }
 
 /**
@@ -65,16 +65,18 @@ export function isForbiddenStatusCode(statusCode?: number): boolean {
   return statusCode === HttpCodes.Forbidden
 }
 
-export function isRetryableStatusCode(statusCode?: number): boolean {
+export function isRetryableStatusCode(statusCode: number | undefined): boolean {
   if (!statusCode) {
     return false
   }
 
   const retryableStatusCodes = [
     HttpCodes.BadGateway,
-    HttpCodes.ServiceUnavailable,
     HttpCodes.GatewayTimeout,
-    HttpCodes.TooManyRequests
+    HttpCodes.InternalServerError,
+    HttpCodes.ServiceUnavailable,
+    HttpCodes.TooManyRequests,
+    413 // Payload Too Large
   ]
   return retryableStatusCodes.includes(statusCode)
 }
@@ -204,8 +206,8 @@ export function getUploadHeaders(
   return requestOptions
 }
 
-export function createHttpClient(): HttpClient {
-  return new HttpClient('actions/artifact', [
+export function createHttpClient(userAgent: string): HttpClient {
+  return new HttpClient(userAgent, [
     new BearerCredentialHandler(getRuntimeToken())
   ])
 }
@@ -235,55 +237,6 @@ Header Information: ${JSON.stringify(response.message.headers, undefined, 2)}
   )
 }
 
-/**
- * Invalid characters that cannot be in the artifact name or an uploaded file. Will be rejected
- * from the server if attempted to be sent over. These characters are not allowed due to limitations with certain
- * file systems such as NTFS. To maintain platform-agnostic behavior, all characters that are not supported by an
- * individual filesystem/platform will not be supported on all fileSystems/platforms
- *
- * FilePaths can include characters such as \ and / which are not permitted in the artifact name alone
- */
-const invalidArtifactFilePathCharacters = ['"', ':', '<', '>', '|', '*', '?']
-const invalidArtifactNameCharacters = [
-  ...invalidArtifactFilePathCharacters,
-  '\\',
-  '/'
-]
-
-/**
- * Scans the name of the artifact to make sure there are no illegal characters
- */
-export function checkArtifactName(name: string): void {
-  if (!name) {
-    throw new Error(`Artifact name: ${name}, is incorrectly provided`)
-  }
-
-  for (const invalidChar of invalidArtifactNameCharacters) {
-    if (name.includes(invalidChar)) {
-      throw new Error(
-        `Artifact name is not valid: ${name}. Contains character: "${invalidChar}". Invalid artifact name characters include: ${invalidArtifactNameCharacters.toString()}.`
-      )
-    }
-  }
-}
-
-/**
- * Scans the name of the filePath used to make sure there are no illegal characters
- */
-export function checkArtifactFilePath(path: string): void {
-  if (!path) {
-    throw new Error(`Artifact path: ${path}, is incorrectly provided`)
-  }
-
-  for (const invalidChar of invalidArtifactFilePathCharacters) {
-    if (path.includes(invalidChar)) {
-      throw new Error(
-        `Artifact path is not valid: ${path}. Contains character: "${invalidChar}". Invalid characters include: ${invalidArtifactFilePathCharacters.toString()}.`
-      )
-    }
-  }
-}
-
 export async function createDirectoriesForArtifact(
   directories: string[]
 ): Promise<void> {
@@ -300,4 +253,41 @@ export async function createEmptyFilesForArtifact(
   for (const filePath of emptyFilesToCreate) {
     await (await fs.open(filePath, 'w')).close()
   }
+}
+
+export async function getFileSize(filePath: string): Promise<number> {
+  const stats = await fs.stat(filePath)
+  debug(
+    `${filePath} size:(${stats.size}) blksize:(${stats.blksize}) blocks:(${stats.blocks})`
+  )
+  return stats.size
+}
+
+export async function rmFile(filePath: string): Promise<void> {
+  await fs.unlink(filePath)
+}
+
+export function getProperRetention(
+  retentionInput: number,
+  retentionSetting: string | undefined
+): number {
+  if (retentionInput < 0) {
+    throw new Error('Invalid retention, minimum value is 1.')
+  }
+
+  let retention = retentionInput
+  if (retentionSetting) {
+    const maxRetention = parseInt(retentionSetting)
+    if (!isNaN(maxRetention) && maxRetention < retention) {
+      warning(
+        `Retention days is greater than the max value allowed by the repository setting, reduce retention to ${maxRetention} days`
+      )
+      retention = maxRetention
+    }
+  }
+  return retention
+}
+
+export async function sleep(milliseconds: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, milliseconds))
 }

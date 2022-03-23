@@ -2,6 +2,10 @@ import * as http from 'http'
 import * as io from '../../io/src/io'
 import * as net from 'net'
 import * as path from 'path'
+import {mocked} from 'ts-jest/utils'
+import {exec, execSync} from 'child_process'
+import {createGunzip} from 'zlib'
+import {promisify} from 'util'
 import {UploadHttpClient} from '../src/internal/upload-http-client'
 import * as core from '@actions/core'
 import {promises as fs} from 'fs'
@@ -13,6 +17,7 @@ import {
 } from '../src/internal/contracts'
 import {UploadSpecification} from '../src/internal/upload-specification'
 import {getArtifactUrl} from '../src/internal/utils'
+import {UploadOptions} from '../src/internal/upload-options'
 
 const root = path.join(__dirname, '_temp', 'artifact-upload')
 const file1Path = path.join(root, 'file1.txt')
@@ -101,9 +106,20 @@ describe('Upload Tests', () => {
       uploadHttpClient.createArtifactInFileContainer(artifactName)
     ).rejects.toEqual(
       new Error(
-        `Unable to create a container for the artifact invalid-artifact-name at ${getArtifactUrl()}`
+        `Create Artifact Container failed: The artifact name invalid-artifact-name is not valid. Request URL ${getArtifactUrl()}`
       )
     )
+  })
+
+  it('Create Artifact - Retention Less Than Min Value Error', async () => {
+    const artifactName = 'valid-artifact-name'
+    const options: UploadOptions = {
+      retentionDays: -1
+    }
+    const uploadHttpClient = new UploadHttpClient()
+    expect(
+      uploadHttpClient.createArtifactInFileContainer(artifactName, options)
+    ).rejects.toEqual(new Error('Invalid retention, minimum value is 1.'))
   })
 
   it('Create Artifact - Storage Quota Error', async () => {
@@ -113,7 +129,7 @@ describe('Upload Tests', () => {
       uploadHttpClient.createArtifactInFileContainer(artifactName)
     ).rejects.toEqual(
       new Error(
-        'Artifact storage quota has been hit. Unable to upload any new artifacts'
+        'Create Artifact Container failed: Artifact storage quota has been hit. Unable to upload any new artifacts'
       )
     )
   })
@@ -161,6 +177,59 @@ describe('Upload Tests', () => {
     expect(uploadResult.failedItems.length).toEqual(0)
     expect(uploadResult.uploadSize).toEqual(expectedTotalSize)
   })
+
+  function hasMkfifo(): boolean {
+    try {
+      // make sure we drain the stdout
+      return (
+        process.platform !== 'win32' &&
+        execSync('which mkfifo').toString().length > 0
+      )
+    } catch (e) {
+      return false
+    }
+  }
+  const withMkfifoIt = hasMkfifo() ? it : it.skip
+  withMkfifoIt(
+    'Upload Artifact with content from named pipe - Success',
+    async () => {
+      // create a named pipe 'pipe' with content 'hello pipe'
+      const content = Buffer.from('hello pipe')
+      const pipeFilePath = path.join(root, 'pipe')
+      await promisify(exec)('mkfifo pipe', {cwd: root})
+      // don't want to await here as that would block until read
+      fs.writeFile(pipeFilePath, content)
+
+      const artifactName = 'successful-artifact'
+      const uploadSpecification: UploadSpecification[] = [
+        {
+          absoluteFilePath: pipeFilePath,
+          uploadFilePath: `${artifactName}/pipe`
+        }
+      ]
+
+      const uploadUrl = `${getRuntimeUrl()}_apis/resources/Containers/13`
+      const uploadHttpClient = new UploadHttpClient()
+      const uploadResult = await uploadHttpClient.uploadArtifactToFileContainer(
+        uploadUrl,
+        uploadSpecification
+      )
+
+      // accesses the ReadableStream that was passed into sendStream
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const stream = mocked(HttpClient.prototype.sendStream).mock.calls[0][2]
+      expect(stream).not.toBeNull()
+      // decompresses the passed stream
+      const data: Buffer[] = []
+      for await (const chunk of stream.pipe(createGunzip())) {
+        data.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string))
+      }
+      const uploaded = Buffer.concat(data)
+
+      expect(uploadResult.failedItems.length).toEqual(0)
+      expect(uploaded).toEqual(content)
+    }
+  )
 
   it('Upload Artifact - Failed Single File Upload', async () => {
     const uploadSpecification: UploadSpecification[] = [
@@ -350,7 +419,9 @@ describe('Upload Tests', () => {
     const uploadHttpClient = new UploadHttpClient()
     expect(
       uploadHttpClient.patchArtifactSize(-2, 'my-artifact')
-    ).rejects.toThrow('Unable to finish uploading artifact my-artifact')
+    ).rejects.toThrow(
+      'Finalize artifact upload failed: Artifact service responded with 400'
+    )
   })
 
   /**

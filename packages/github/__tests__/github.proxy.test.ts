@@ -49,12 +49,12 @@ describe('@actions/github', () => {
     }
 
     const octokit = getOctokit(token)
-    const branch = await octokit.repos.getBranch({
+    const branch = await octokit.rest.repos.getBranch({
       owner: 'actions',
       repo: 'toolkit',
-      branch: 'master'
+      branch: 'main'
     })
-    expect(branch.data.name).toBe('master')
+    expect(branch.data.name).toBe('main')
     expect(proxyConnects).toEqual(['api.github.com:443'])
   })
 
@@ -85,12 +85,12 @@ describe('@actions/github', () => {
         agent: new https.Agent()
       }
     })
-    const branch = await octokit.repos.getBranch({
+    const branch = await octokit.rest.repos.getBranch({
       owner: 'actions',
       repo: 'toolkit',
-      branch: 'master'
+      branch: 'main'
     })
-    expect(branch.data.name).toBe('master')
+    expect(branch.data.name).toBe('main')
     expect(proxyConnects).toHaveLength(0)
   })
 

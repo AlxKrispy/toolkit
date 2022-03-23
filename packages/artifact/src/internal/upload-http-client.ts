@@ -15,26 +15,29 @@ import {
   isRetryableStatusCode,
   isSuccessStatusCode,
   isThrottledStatusCode,
-  isForbiddenStatusCode,
   displayHttpDiagnostics,
   getExponentialRetryTimeInMilliseconds,
-  tryGetRetryAfterValueTimeInMilliseconds
+  tryGetRetryAfterValueTimeInMilliseconds,
+  getProperRetention,
+  sleep
 } from './utils'
 import {
   getUploadChunkSize,
   getUploadFileConcurrency,
-  getRetryLimit
+  getRetryLimit,
+  getRetentionDays
 } from './config-variables'
 import {promisify} from 'util'
 import {URL} from 'url'
 import {performance} from 'perf_hooks'
 import {StatusReporter} from './status-reporter'
-import {HttpClientResponse} from '@actions/http-client/index'
+import {HttpCodes} from '@actions/http-client'
 import {IHttpClientResponse} from '@actions/http-client/interfaces'
 import {HttpManager} from './http-manager'
 import {UploadSpecification} from './upload-specification'
 import {UploadOptions} from './upload-options'
 import {createGZipFileOnDisk, createGZipFileInBuffer} from './upload-gzip'
+import {retryHttpClientRequest} from './requestUtils'
 const stat = promisify(fs.stat)
 
 export class UploadHttpClient {
@@ -42,7 +45,10 @@ export class UploadHttpClient {
   private statusReporter: StatusReporter
 
   constructor() {
-    this.uploadHttpManager = new HttpManager(getUploadFileConcurrency())
+    this.uploadHttpManager = new HttpManager(
+      getUploadFileConcurrency(),
+      '@actions/artifact-upload'
+    )
     this.statusReporter = new StatusReporter(10000)
   }
 
@@ -52,35 +58,51 @@ export class UploadHttpClient {
    * @returns The response from the Artifact Service if the file container was successfully created
    */
   async createArtifactInFileContainer(
-    artifactName: string
+    artifactName: string,
+    options?: UploadOptions | undefined
   ): Promise<ArtifactResponse> {
     const parameters: CreateArtifactParameters = {
       Type: 'actions_storage',
       Name: artifactName
     }
+
+    // calculate retention period
+    if (options && options.retentionDays) {
+      const maxRetentionStr = getRetentionDays()
+      parameters.RetentionDays = getProperRetention(
+        options.retentionDays,
+        maxRetentionStr
+      )
+    }
+
     const data: string = JSON.stringify(parameters, null, 2)
     const artifactUrl = getArtifactUrl()
 
     // use the first client from the httpManager, `keep-alive` is not used so the connection will close immediately
     const client = this.uploadHttpManager.getClient(0)
     const headers = getUploadHeaders('application/json', false)
-    const rawResponse = await client.post(artifactUrl, data, headers)
-    const body: string = await rawResponse.readBody()
 
-    if (isSuccessStatusCode(rawResponse.message.statusCode) && body) {
-      return JSON.parse(body)
-    } else if (isForbiddenStatusCode(rawResponse.message.statusCode)) {
-      // if a 403 is returned when trying to create a file container, the customer has exceeded
-      // their storage quota so no new artifact containers can be created
-      throw new Error(
-        `Artifact storage quota has been hit. Unable to upload any new artifacts`
-      )
-    } else {
-      displayHttpDiagnostics(rawResponse)
-      throw new Error(
-        `Unable to create a container for the artifact ${artifactName} at ${artifactUrl}`
-      )
-    }
+    // Extra information to display when a particular HTTP code is returned
+    // If a 403 is returned when trying to create a file container, the customer has exceeded
+    // their storage quota so no new artifact containers can be created
+    const customErrorMessages: Map<number, string> = new Map([
+      [
+        HttpCodes.Forbidden,
+        'Artifact storage quota has been hit. Unable to upload any new artifacts'
+      ],
+      [
+        HttpCodes.BadRequest,
+        `The artifact name ${artifactName} is not valid. Request URL ${artifactUrl}`
+      ]
+    ])
+
+    const response = await retryHttpClientRequest(
+      'Create Artifact Container',
+      async () => client.post(artifactUrl, data, headers),
+      customErrorMessages
+    )
+    const body: string = await response.readBody()
+    return JSON.parse(body)
   }
 
   /**
@@ -197,29 +219,41 @@ export class UploadHttpClient {
     httpClientIndex: number,
     parameters: UploadFileParameters
   ): Promise<UploadFileResult> {
-    const totalFileSize: number = (await stat(parameters.file)).size
+    const fileStat: fs.Stats = await stat(parameters.file)
+    const totalFileSize = fileStat.size
+    const isFIFO = fileStat.isFIFO()
     let offset = 0
     let isUploadSuccessful = true
     let failedChunkSizes = 0
     let uploadFileSize = 0
     let isGzip = true
 
-    // the file that is being uploaded is less than 64k in size, to increase throughput and to minimize disk I/O
+    // the file that is being uploaded is less than 64k in size to increase throughput and to minimize disk I/O
     // for creating a new GZip file, an in-memory buffer is used for compression
-    if (totalFileSize < 65536) {
+    // with named pipes the file size is reported as zero in that case don't read the file in memory
+    if (!isFIFO && totalFileSize < 65536) {
+      core.debug(
+        `${parameters.file} is less than 64k in size. Creating a gzip file in-memory to potentially reduce the upload size`
+      )
       const buffer = await createGZipFileInBuffer(parameters.file)
 
-      //An open stream is needed in the event of a failure and we need to retry. If a NodeJS.ReadableStream is directly passed in,
+      // An open stream is needed in the event of a failure and we need to retry. If a NodeJS.ReadableStream is directly passed in,
       // it will not properly get reset to the start of the stream if a chunk upload needs to be retried
       let openUploadStream: () => NodeJS.ReadableStream
 
       if (totalFileSize < buffer.byteLength) {
         // compression did not help with reducing the size, use a readable stream from the original file for upload
+        core.debug(
+          `The gzip file created for ${parameters.file} did not help with reducing the size of the file. The original file will be uploaded as-is`
+        )
         openUploadStream = () => fs.createReadStream(parameters.file)
         isGzip = false
         uploadFileSize = totalFileSize
       } else {
         // create a readable stream using a PassThrough stream that is both readable and writable
+        core.debug(
+          `A gzip file created for ${parameters.file} helped with reducing the size of the original file. The file will be uploaded using gzip.`
+        )
         openUploadStream = () => {
           const passThrough = new stream.PassThrough()
           passThrough.end(buffer)
@@ -255,6 +289,9 @@ export class UploadHttpClient {
       // the file that is being uploaded is greater than 64k in size, a temporary file gets created on disk using the
       // npm tmp-promise package and this file gets used to create a GZipped file
       const tempFile = await tmp.file()
+      core.debug(
+        `${parameters.file} is greater than 64k in size. Creating a gzip file on-disk ${tempFile.path} to potentially reduce the upload size`
+      )
 
       // create a GZip file of the original file being uploaded, the original file should not be modified in any way
       uploadFileSize = await createGZipFileOnDisk(
@@ -265,10 +302,18 @@ export class UploadHttpClient {
       let uploadFilePath = tempFile.path
 
       // compression did not help with size reduction, use the original file for upload and delete the temp GZip file
-      if (totalFileSize < uploadFileSize) {
+      // for named pipes totalFileSize is zero, this assumes compression did help
+      if (!isFIFO && totalFileSize < uploadFileSize) {
+        core.debug(
+          `The gzip file created for ${parameters.file} did not help with reducing the size of the file. The original file will be uploaded as-is`
+        )
         uploadFileSize = totalFileSize
         uploadFilePath = parameters.file
         isGzip = false
+      } else {
+        core.debug(
+          `The gzip file created for ${parameters.file} is smaller than the original file. The file will be uploaded using gzip.`
+        )
       }
 
       let abortFileUpload = false
@@ -279,17 +324,8 @@ export class UploadHttpClient {
           parameters.maxChunkSize
         )
 
-        // if an individual file is greater than 100MB (1024*1024*100) in size, display extra information about the upload status
-        if (uploadFileSize > 104857600) {
-          this.statusReporter.updateLargeFileStatus(
-            parameters.file,
-            offset,
-            uploadFileSize
-          )
-        }
-
-        const start = offset
-        const end = offset + chunkSize - 1
+        const startChunkIndex = offset
+        const endChunkIndex = offset + chunkSize - 1
         offset += parameters.maxChunkSize
 
         if (abortFileUpload) {
@@ -303,12 +339,12 @@ export class UploadHttpClient {
           parameters.resourceUrl,
           () =>
             fs.createReadStream(uploadFilePath, {
-              start,
-              end,
+              start: startChunkIndex,
+              end: endChunkIndex,
               autoClose: false
             }),
-          start,
-          end,
+          startChunkIndex,
+          endChunkIndex,
           uploadFileSize,
           isGzip,
           totalFileSize
@@ -321,11 +357,22 @@ export class UploadHttpClient {
           failedChunkSizes += chunkSize
           core.warning(`Aborting upload for ${parameters.file} due to failure`)
           abortFileUpload = true
+        } else {
+          // if an individual file is greater than 8MB (1024*1024*8) in size, display extra information about the upload status
+          if (uploadFileSize > 8388608) {
+            this.statusReporter.updateLargeFileStatus(
+              parameters.file,
+              startChunkIndex,
+              endChunkIndex,
+              uploadFileSize
+            )
+          }
         }
       }
 
       // Delete the temporary file that was created as part of the upload. If the temp file does not get manually deleted by
       // calling cleanup, it gets removed when the node process exits. For more info see: https://www.npmjs.com/package/tmp-promise#about
+      core.debug(`deleting temporary gzip file ${tempFile.path}`)
       await tempFile.cleanup()
 
       return {
@@ -401,13 +448,13 @@ export class UploadHttpClient {
         core.info(
           `Backoff due to too many requests, retry #${retryCount}. Waiting for ${retryAfterValue} milliseconds before continuing the upload`
         )
-        await new Promise(resolve => setTimeout(resolve, retryAfterValue))
+        await sleep(retryAfterValue)
       } else {
         const backoffTime = getExponentialRetryTimeInMilliseconds(retryCount)
         core.info(
           `Exponential backoff for retry #${retryCount}. Waiting for ${backoffTime} milliseconds before continuing the upload at offset ${start}`
         )
-        await new Promise(resolve => setTimeout(resolve, backoffTime))
+        await sleep(backoffTime)
       }
       core.info(
         `Finished backoff for retry #${retryCount}, continuing with upload`
@@ -470,7 +517,6 @@ export class UploadHttpClient {
    * Updating the size indicates that we are done uploading all the contents of the artifact
    */
   async patchArtifactSize(size: number, artifactName: string): Promise<void> {
-    const headers = getUploadHeaders('application/json', false)
     const resourceUrl = new URL(getArtifactUrl())
     resourceUrl.searchParams.append('artifactName', artifactName)
 
@@ -480,25 +526,26 @@ export class UploadHttpClient {
 
     // use the first client from the httpManager, `keep-alive` is not used so the connection will close immediately
     const client = this.uploadHttpManager.getClient(0)
-    const response: HttpClientResponse = await client.patch(
-      resourceUrl.toString(),
-      data,
-      headers
+    const headers = getUploadHeaders('application/json', false)
+
+    // Extra information to display when a particular HTTP code is returned
+    const customErrorMessages: Map<number, string> = new Map([
+      [
+        HttpCodes.NotFound,
+        `An Artifact with the name ${artifactName} was not found`
+      ]
+    ])
+
+    // TODO retry for all possible response codes, the artifact upload is pretty much complete so it at all costs we should try to finish this
+    const response = await retryHttpClientRequest(
+      'Finalize artifact upload',
+      async () => client.patch(resourceUrl.toString(), data, headers),
+      customErrorMessages
     )
-    const body: string = await response.readBody()
-    if (isSuccessStatusCode(response.message.statusCode)) {
-      core.debug(
-        `Artifact ${artifactName} has been successfully uploaded, total size in bytes: ${size}`
-      )
-    } else if (response.message.statusCode === 404) {
-      throw new Error(`An Artifact with the name ${artifactName} was not found`)
-    } else {
-      displayHttpDiagnostics(response)
-      core.info(body)
-      throw new Error(
-        `Unable to finish uploading artifact ${artifactName} to ${resourceUrl}`
-      )
-    }
+    await response.readBody()
+    core.debug(
+      `Artifact ${artifactName} has been successfully uploaded, total size in bytes: ${size}`
+    )
   }
 }
 

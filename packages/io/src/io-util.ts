@@ -33,7 +33,7 @@ export async function exists(fsPath: string): Promise<boolean> {
 
 export async function isDirectory(
   fsPath: string,
-  useStat: boolean = false
+  useStat = false
 ): Promise<boolean> {
   const stats = useStat ? await stat(fsPath) : await lstat(fsPath)
   return stats.isDirectory()
@@ -165,4 +165,9 @@ function isUnixExecutable(stats: fs.Stats): boolean {
     ((stats.mode & 8) > 0 && stats.gid === process.getgid()) ||
     ((stats.mode & 64) > 0 && stats.uid === process.getuid())
   )
+}
+
+// Get the path of cmd.exe in windows
+export function getCmdPath(): string {
+  return process.env['COMSPEC'] ?? `cmd.exe`
 }

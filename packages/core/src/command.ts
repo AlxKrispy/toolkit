@@ -1,11 +1,12 @@
 import * as os from 'os'
+import {toCommandValue} from './utils'
 
 // For internal use, subject to change.
 
 // We use any as a valid input type
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-interface CommandProperties {
+export interface CommandProperties {
   [key: string]: any
 }
 
@@ -28,7 +29,7 @@ export function issueCommand(
   process.stdout.write(cmd.toString() + os.EOL)
 }
 
-export function issue(name: string, message: string = ''): void {
+export function issue(name: string, message = ''): void {
   issueCommand(name, {}, message)
 }
 
@@ -74,19 +75,6 @@ class Command {
     cmdStr += `${CMD_STRING}${escapeData(this.message)}`
     return cmdStr
   }
-}
-
-/**
- * Sanitizes an input into a string so it can be passed into issueCommand safely
- * @param input input to sanitize into a string
- */
-export function toCommandValue(input: any): string {
-  if (input === null || input === undefined) {
-    return ''
-  } else if (typeof input === 'string' || input instanceof String) {
-    return input as string
-  }
-  return JSON.stringify(input)
 }
 
 function escapeData(s: any): string {

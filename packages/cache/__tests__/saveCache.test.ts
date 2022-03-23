@@ -17,7 +17,6 @@ beforeAll(() => {
   jest.spyOn(core, 'warning').mockImplementation(() => {})
   jest.spyOn(core, 'error').mockImplementation(() => {})
 
-  // eslint-disable-next-line @typescript-eslint/promise-function-async
   jest.spyOn(cacheUtils, 'getCacheFileName').mockImplementation(cm => {
     const actualUtils = jest.requireActual('../src/internal/cacheUtils')
     return actualUtils.getCacheFileName(cm)
@@ -47,9 +46,9 @@ test('save with large cache outputs should fail', async () => {
 
   const createTarMock = jest.spyOn(tar, 'createTar')
 
-  const cacheSize = 6 * 1024 * 1024 * 1024 //~6GB, over the 5GB limit
+  const cacheSize = 11 * 1024 * 1024 * 1024 //~11GB, over the 10GB limit
   jest
-    .spyOn(cacheUtils, 'getArchiveFileSizeIsBytes')
+    .spyOn(cacheUtils, 'getArchiveFileSizeInBytes')
     .mockReturnValueOnce(cacheSize)
   const compression = CompressionMethod.Gzip
   const getCompressionMock = jest
@@ -57,7 +56,7 @@ test('save with large cache outputs should fail', async () => {
     .mockReturnValueOnce(Promise.resolve(compression))
 
   await expect(saveCache([filePath], primaryKey)).rejects.toThrowError(
-    'Cache size of ~6144 MB (6442450944 B) is over the 5GB limit, not saving cache.'
+    'Cache size of ~11264 MB (11811160064 B) is over the 10GB limit, not saving cache.'
   )
 
   const archiveFolder = '/foo/bar'

@@ -9,7 +9,7 @@ import * as util from 'util'
 import {v4 as uuidV4} from 'uuid'
 import {CacheFilename, CompressionMethod} from './constants'
 
-// From https://github.com/actions/toolkit/blob/master/packages/tool-cache/src/tool-cache.ts#L23
+// From https://github.com/actions/toolkit/blob/main/packages/tool-cache/src/tool-cache.ts#L23
 export async function createTempDirectory(): Promise<string> {
   const IS_WINDOWS = process.platform === 'win32'
 
@@ -35,7 +35,7 @@ export async function createTempDirectory(): Promise<string> {
   return dest
 }
 
-export function getArchiveFileSizeIsBytes(filePath: string): number {
+export function getArchiveFileSizeInBytes(filePath: string): number {
   return fs.statSync(filePath).size
 }
 
@@ -47,7 +47,9 @@ export async function resolvePaths(patterns: string[]): Promise<string[]> {
   })
 
   for await (const file of globber.globGenerator()) {
-    const relativeFile = path.relative(workspace, file)
+    const relativeFile = path
+      .relative(workspace, file)
+      .replace(new RegExp(`\\${path.sep}`, 'g'), '/')
     core.debug(`Matched: ${relativeFile}`)
     // Paths are made relative so the tar entries are all relative to the root of the workspace.
     paths.push(`${relativeFile}`)

@@ -189,7 +189,7 @@ async function uploadChunk(
     'Content-Range': getContentRange(start, end)
   }
 
-  await retryHttpClientResponse(
+  const uploadChunkResponse = await retryHttpClientResponse(
     `uploadChunk (start: ${start}, end: ${end})`,
     async () =>
       httpClient.sendStream(
@@ -199,6 +199,12 @@ async function uploadChunk(
         additionalHeaders
       )
   )
+
+  if (!isSuccessStatusCode(uploadChunkResponse.message.statusCode)) {
+    throw new Error(
+      `Cache service responded with ${uploadChunkResponse.message.statusCode} during upload chunk.`
+    )
+  }
 }
 
 async function uploadFile(
@@ -208,7 +214,7 @@ async function uploadFile(
   options?: UploadOptions
 ): Promise<void> {
   // Upload Chunks
-  const fileSize = fs.statSync(archivePath).size
+  const fileSize = utils.getArchiveFileSizeInBytes(archivePath)
   const resourceUrl = getCacheApiUrl(`caches/${cacheId.toString()}`)
   const fd = fs.openSync(archivePath, 'r')
   const uploadOptions = getUploadOptions(options)
@@ -289,7 +295,11 @@ export async function saveCache(
 
   // Commit Cache
   core.debug('Commiting cache')
-  const cacheSize = utils.getArchiveFileSizeIsBytes(archivePath)
+  const cacheSize = utils.getArchiveFileSizeInBytes(archivePath)
+  core.info(
+    `Cache Size: ~${Math.round(cacheSize / (1024 * 1024))} MB (${cacheSize} B)`
+  )
+
   const commitCacheResponse = await commitCache(httpClient, cacheId, cacheSize)
   if (!isSuccessStatusCode(commitCacheResponse.statusCode)) {
     throw new Error(

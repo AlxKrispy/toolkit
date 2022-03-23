@@ -46,64 +46,18 @@ describe('Utils', () => {
     }
   })
 
-  it('Check Artifact Name for any invalid characters', () => {
-    const invalidNames = [
-      'my\\artifact',
-      'my/artifact',
-      'my"artifact',
-      'my:artifact',
-      'my<artifact',
-      'my>artifact',
-      'my|artifact',
-      'my*artifact',
-      'my?artifact',
-      ''
-    ]
-    for (const invalidName of invalidNames) {
-      expect(() => {
-        utils.checkArtifactName(invalidName)
-      }).toThrow()
-    }
-
-    const validNames = [
-      'my-normal-artifact',
-      'myNormalArtifact',
-      'm¥ñðrmålÄr†ï£å¢†'
-    ]
-    for (const validName of validNames) {
-      expect(() => {
-        utils.checkArtifactName(validName)
-      }).not.toThrow()
-    }
+  it('Test negative artifact retention throws', () => {
+    expect(() => {
+      utils.getProperRetention(-1, undefined)
+    }).toThrow()
   })
 
-  it('Check Artifact File Path for any invalid characters', () => {
-    const invalidNames = [
-      'some/invalid"artifact/path',
-      'some/invalid:artifact/path',
-      'some/invalid<artifact/path',
-      'some/invalid>artifact/path',
-      'some/invalid|artifact/path',
-      'some/invalid*artifact/path',
-      'some/invalid?artifact/path',
-      ''
-    ]
-    for (const invalidName of invalidNames) {
-      expect(() => {
-        utils.checkArtifactFilePath(invalidName)
-      }).toThrow()
-    }
+  it('Test no setting specified takes artifact retention input', () => {
+    expect(utils.getProperRetention(180, undefined)).toEqual(180)
+  })
 
-    const validNames = [
-      'my/perfectly-normal/artifact-path',
-      'my/perfectly\\Normal/Artifact-path',
-      'm¥/ñðrmål/Är†ï£å¢†'
-    ]
-    for (const validName of validNames) {
-      expect(() => {
-        utils.checkArtifactFilePath(validName)
-      }).not.toThrow()
-    }
+  it('Test artifact retention must conform to max allowed', () => {
+    expect(utils.getProperRetention(180, '45')).toEqual(45)
   })
 
   it('Test constructing artifact URL', () => {
@@ -192,6 +146,7 @@ describe('Utils', () => {
     expect(utils.isRetryableStatusCode(HttpCodes.OK)).toEqual(false)
     expect(utils.isRetryableStatusCode(HttpCodes.NotFound)).toEqual(false)
     expect(utils.isRetryableStatusCode(HttpCodes.Forbidden)).toEqual(false)
+    expect(utils.isRetryableStatusCode(413)).toEqual(true) // Payload Too Large
   })
 
   it('Test Throttled Status Code', () => {
